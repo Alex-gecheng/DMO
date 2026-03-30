@@ -9,6 +9,7 @@ from solvers.optimize import optimize_mesh
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    optimizer_type = "adam" 
     print("Using device:", device)
 
     # =========================
@@ -90,6 +91,7 @@ def main():
         anchor_targets=anchor_targets,
         num_iters=1500,
         lr=1e-2,
+        optimizer_type=optimizer_type,
         w_ctrl=1000.0,
         w_lap=5.0,
         w_edge=10.0,

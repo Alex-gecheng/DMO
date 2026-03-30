@@ -3,7 +3,8 @@ from loss.control_loss import control_loss
 from loss.laplacian_loss import laplacian_loss
 from loss.edge_loss import edge_loss
 from loss.anchor_loss import anchor_loss
-
+from loss.displacement_loss import displacement_loss
+from loss.arap_loss import arap_loss
 
 
 def optimize_mesh(
@@ -17,10 +18,13 @@ def optimize_mesh(
     anchor_targets,
     num_iters=1000,
     lr=1e-2,
+    optimizer_type="lbfgs",
     w_ctrl=1000.0,
     w_lap=1.0,
     w_edge=1.0,
     w_anchor=1000,
+    w_disp=0.01,
+    w_arap=50.0,
     device="cuda",
 ):
     """
@@ -33,6 +37,7 @@ def optimize_mesh(
         control_targets: (K, 3) torch.float32
         anchor_ids: (L,) torch.long
         anchor_targets: (L, 3) torch.float32
+        optimizer_type: "adam" or "lbfgs"
 
 
     Returns:
@@ -50,28 +55,77 @@ def optimize_mesh(
 
     delta_v = torch.nn.Parameter(torch.zeros_like(V))
 
-    optimizer = torch.optim.Adam([delta_v], lr=lr)
+    optimizer_name = optimizer_type.lower()
+    if optimizer_name == "adam":
+        optimizer = torch.optim.Adam([delta_v], lr=lr)
+    elif optimizer_name == "lbfgs":
+        optimizer = torch.optim.LBFGS([delta_v], lr=lr)
+    else:
+        raise ValueError(f"Unsupported optimizer_type: {optimizer_type}. Use 'adam' or 'lbfgs'.")
 
     for it in range(num_iters):
-        V_def = V + delta_v
+        if optimizer_name == "lbfgs":
+            def closure():
+                optimizer.zero_grad()
+                V_def_local = V + delta_v
+                l_ctrl_local = control_loss(V_def_local, control_ids, control_targets)
+                l_anchor_local = anchor_loss(V_def_local, anchor_ids, anchor_targets)
+                l_lap_local = laplacian_loss(V, V_def_local, L_torch)
+                l_edge_local = edge_loss(V, V_def_local, edges)
+                l_disp_local = displacement_loss(delta_v)
+                l_arap_local = arap_loss(V, V_def_local, edges)
 
-        l_ctrl = control_loss(V_def, control_ids, control_targets)
-        l_anchor = anchor_loss(V_def, anchor_ids, anchor_targets)
-        l_lap = laplacian_loss(V, V_def, L_torch)
-        l_edge = edge_loss(V, V_def, edges)
+                loss_local = (
+                    w_ctrl * l_ctrl_local
+                    + w_lap * l_lap_local
+                    + w_edge * l_edge_local
+                    + w_anchor * l_anchor_local
+                    + w_disp * l_disp_local
+                    + w_arap * l_arap_local
+                )
+                loss_local.backward()
+                return loss_local
 
-        loss = (
-            w_ctrl * l_ctrl
-            + w_lap * l_lap
-            + w_edge * l_edge
-            + w_anchor * l_anchor
-        )
+            optimizer.step(closure)
+        else:
+            optimizer.zero_grad()
+            V_def_step = V + delta_v
+            l_ctrl_step = control_loss(V_def_step, control_ids, control_targets)
+            l_anchor_step = anchor_loss(V_def_step, anchor_ids, anchor_targets)
+            l_lap_step = laplacian_loss(V, V_def_step, L_torch)
+            l_edge_step = edge_loss(V, V_def_step, edges)
+            l_disp_step = displacement_loss(delta_v)
+            l_arap_step = arap_loss(V, V_def_step, edges)
+            loss_step = (
+                w_ctrl * l_ctrl_step
+                + w_lap * l_lap_step
+                + w_edge * l_edge_step
+                + w_anchor * l_anchor_step
+                + w_disp * l_disp_step
+                + w_arap * l_arap_step
+            )
+            loss_step.backward()
+            optimizer.step()
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        
 
         if  (it % 100 == 0 or it == num_iters - 1):
+            with torch.no_grad():
+                V_def = V + delta_v
+                l_ctrl = control_loss(V_def, control_ids, control_targets)
+                l_anchor = anchor_loss(V_def, anchor_ids, anchor_targets)
+                l_lap = laplacian_loss(V, V_def, L_torch)
+                l_edge = edge_loss(V, V_def, edges)
+                l_disp = displacement_loss(delta_v)
+                l_arap = arap_loss(V, V_def, edges)
+                loss = (
+                    w_ctrl * l_ctrl
+                    + w_lap * l_lap
+                    + w_edge * l_edge
+                    + w_anchor * l_anchor
+                    + w_disp * l_disp
+                    + w_arap * l_arap
+                )
             print(
                 f"[{it:04d}/{num_iters}] "
                 f"total={loss.item():.6f} | "
@@ -81,8 +135,10 @@ def optimize_mesh(
                 f"anchor_raw={l_anchor.item():.6f}, "
                 f"ctrl_w={(w_ctrl*l_ctrl).item():.6f}, "
                 f"lap_w={(w_lap*l_lap).item():.6f}, "
-                f"edge_w={(w_edge*l_edge).item():.6f}"
-                f"anchor_w={(w_anchor*l_anchor).item():.6f}"
+                f"edge_w={(w_edge*l_edge).item():.6f}, "
+                f"anchor_w={(w_anchor*l_anchor).item():.6f}, "
+                f"disp_w={(w_disp*l_disp).item():.6f}, "
+                f"arap_w={(w_arap*l_arap).item():.6f}"
             )
 
     V_def = V + delta_v
